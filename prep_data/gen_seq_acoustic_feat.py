@@ -58,12 +58,10 @@ def extract_feature(dataLoader, dataset_type):
 
         with torch.inference_mode():
             audio_embedding, _ = wav2vec2.extract_features(audio)
-        # print(audio_embedding.shape)
 
         for i, feats in enumerate(audio_embedding):
             if i == 14:
                 my_feature = feats
-        # print(my_feature.size())
         # print(my_feature)
         extract_feat_list.append(my_feature.cpu())
 
@@ -81,7 +79,6 @@ def extract_feature(dataLoader, dataset_type):
     extract_feat_tensor = torch.cat(extract_feat_list, dim=1)  # cat all frames in 1024 dim
     # print(extract_feat_tensor.shape)
     extract_feat_tensor = extract_feat_tensor.view(extract_feat_tensor.size(1), -1)
-    print(extract_feat_tensor.shape)
 
     return extract_feat_tensor, saved_tensor_dict
 

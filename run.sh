@@ -11,6 +11,8 @@
 #SBATCH --output=../exp/log_%j.txt
 
 set -x
+stage=1
+stop_stage=1000
 
 lr=1e-3
 batch_size=25
@@ -25,16 +27,23 @@ model(){
   fluScorer
 }
 
-exp_dir=exp/flu-${lr}-${depth}-${batch_size}-${embed_dim}-${model}-${am}-br
+exp_dir=exp/flu-${lr}-${depth}-${batch_size}-${embed_dim}-${model}-${am}-nogelu-br
 
 # repeat times
-# repeat_list=(0 1 2 3 4)
-repeat_list=(0)
+repeat_list=(0 1 2 3 4)
+seed_list=(0 11 22 33 44)
 
-for repeat in "${repeat_list[@]}"
-do
-  mkdir -p $exp_dir-${repeat}
-  python3 ./train.py --lr ${lr} --exp-dir ${exp_dir}-${repeat} \
-  --batch_size ${batch_size} --embed_dim ${embed_dim} \
-  --model ${model} --am ${am} --n-epochs ${num_epochs} --cluster_pred ${cluster_pred}
-done
+if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
+    for repeat in "${repeat_list[@]}"; do
+        mkdir -p $exp_dir/${repeat}
+        python3 train.py \
+            --lr ${lr} \
+            --exp-dir ${exp_dir}/${repeat} \
+            --batch_size ${batch_size} --embed_dim ${embed_dim} \
+            --model ${model} --am ${am} --n-epochs ${num_epochs} \
+            --cluster_pred ${cluster_pred} \
+			--seed "${seed_list[$repeat]}" 
+    done
+    python collect_summary.py --exp-dir $exp_dir
+    exit 0
+fi

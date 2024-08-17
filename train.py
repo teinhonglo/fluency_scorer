@@ -10,7 +10,9 @@ import numpy as np
 from tqdm import tqdm
 import pickle
 import joblib
-from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pad_sequence, pad_packed_sequence
+import random
+import torch
 
 from models import *
 import argparse
@@ -37,6 +39,7 @@ def set_arg(parser):
     parser.add_argument("--model", type=str, default='fluScorer', help="name of the model")
     parser.add_argument("--am", type=str, default='wav2vec2.0', help="name of the acoustic models")
     parser.add_argument("--cluster_pred", type=bool, default=True, help="cluster predict in training or not")
+    parser.add_argument("--seed", type=int, default=66)
     return parser
 
 def convert_bin(input, num_binary=6):
@@ -83,6 +86,16 @@ def draw_train_fig(train_mse_values, val_mse_values, train_corr_values, val_corr
     plt.tight_layout()
     plt.savefig(f"{exp_dir}/train.jpg")
 
+def gen_result_header():
+    utt_header_set = ['utt_train_mse', 'utt_train_pcc', 'utt_test_mse', 'utt_test_pcc']
+    utt_header_score = ['fluency']
+    utt_header = []
+    for dset in utt_header_set:
+        utt_header = utt_header + [dset+'_'+x for x in utt_header_score]
+    
+    header = ['epoch', 'learning_rate'] + utt_header
+    return header
+    
 def train(audio_model, train_loader, test_loader, args):
     gpu_index = 0
     torch.cuda.set_device(gpu_index)
@@ -136,7 +149,10 @@ def train(audio_model, train_loader, test_loader, args):
                 for param_group in optimizer.param_groups:
                     param_group['lr'] = warm_lr
                 print('warm-up learning rate is {:f}'.format(optimizer.param_groups[0]['lr']))
-                
+      
+            cluster_index = indexs + 1
+            cluster_index = cluster_index.to(device)
+            '''
             if args.model == 'fluScorer' and args.cluster_pred:
                 cluster_index = cluster_pred(feats, kmeans_model)
                 cluster_index = cluster_index.to(device)
@@ -147,6 +163,7 @@ def train(audio_model, train_loader, test_loader, args):
                     cluster_index_list.append(cluster_index)
                 cluster_index_tensor = torch.stack(cluster_index_list, dim=0)
                 cluster_index = cluster_index_tensor.to(device)
+            '''
 
             feats = feats.to(device)
             if args.model == 'fluScorer':
@@ -176,10 +193,10 @@ def train(audio_model, train_loader, test_loader, args):
         val_corr_values.append(te_corr)
         epochs_list.append(epoch)
 
-        print('Flency: Train MSE: {:.3f}, CORR: {:.3f}'.format(tr_mse.item(), tr_corr))
-        print(f'Flency: Test MSE: {te_mse.item():.3f}, {bcolors.YELLOW}CORR: {te_corr:.3f}{bcolors.ENDC}')
+        print('Fluency: Train MSE: {:.3f}, CORR: {:.3f}'.format(tr_mse.item(), tr_corr))
+        print(f'Fluency: Test MSE: {te_mse.item():.3f}, {bcolors.YELLOW}CORR: {te_corr:.3f}{bcolors.ENDC}')
 
-        result[epoch, :6] = [epoch, tr_mse, tr_corr, te_mse, te_corr, optimizer.param_groups[0]['lr']]
+        result[epoch, :6] = [epoch, optimizer.param_groups[0]['lr'], tr_mse, tr_corr, te_mse, te_corr]
         print('-------------------validation finished-------------------')
 
         if te_mse < best_mse:
@@ -198,6 +215,8 @@ def train(audio_model, train_loader, test_loader, args):
         epoch += 1
 
     draw_train_fig(train_mse_values, val_mse_values, train_corr_values, val_corr_values, epochs_list, exp_dir)
+    header = ','.join(gen_result_header())
+    np.savetxt(exp_dir + '/result.csv', result, delimiter=',', header=header, comments='')
 
 def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
     gpu_index = 0
@@ -216,6 +235,9 @@ def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
             else:
                 raise ValueError("Unexpected number of elements in data")
             
+            cluster_index = indexs + 1
+            cluster_index = cluster_index.to(device)
+            '''
             if args.model == 'fluScorer' and args.cluster_pred:
                 cluster_index = cluster_pred(feats, kmeans_model)
                 cluster_index = cluster_index.to(device)
@@ -226,6 +248,7 @@ def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
                     cluster_index_list.append(cluster_index)
                 cluster_index_tensor = torch.stack(cluster_index_list, dim=0)
                 cluster_index = cluster_index_tensor.to(device)
+            '''
 
             feats = feats.to(device)
             if args.model == 'fluScorer':
@@ -262,8 +285,6 @@ def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
 def valid_flu(audio_output, target):
     valid_token_pred = audio_output.view(-1).numpy()
     valid_token_target = target.view(-1).numpy()
-    # print(valid_token_pred)
-    # print(valid_token_target)
 
     valid_token_mse = np.mean((valid_token_pred - valid_token_target)**2)
     corr_matrix = np.corrcoef(valid_token_pred, valid_token_target)
@@ -279,12 +300,13 @@ def custom_collate_fn(batch):
     batch = sorted(batch, key=lambda x: x[2].shape[0], reverse=True)
     
     # 提取排序後的資料
-    paths, utt_labels, feats = zip(*batch)
+    paths, utt_labels, feats, index = zip(*batch)
 
     # 將 feat_x 轉換成一個批次，這裡使用 pad_sequence 進行填充
     padded_feats = pad_sequence(feats, batch_first=True)
+    padded_index = pad_sequence(index, batch_first=True, padding_value=-1)
 
-    return paths, torch.stack(utt_labels), padded_feats
+    return paths, torch.stack(utt_labels), padded_feats, padded_index
 
 class fluDataset(Dataset):
     def __init__(self, set, load_cluster_index=None):
@@ -304,7 +326,7 @@ class fluDataset(Dataset):
         self.paths = paths
         self.load_cluster_index = load_cluster_index
         if load_cluster_index:
-            with open(f'data/{dataset_type}_indexs.pkl', 'rb') as file:
+            with open(f'data/{dataset_type}_cluster_index.pkl', 'rb') as file:
                 self.index = pickle.load(file)
 
         with open(f'data/{dataset_type}_feats.pkl', 'rb') as file:
@@ -332,6 +354,13 @@ if __name__ == '__main__':
     if os.path.exists(args.exp_dir) == False:
         os.mkdir(args.exp_dir)
     am = args.am
+    seed = args.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
     print('now train with {:s} acoustic models'.format(am))
     feat_dim = {
                 'wav2vec2_base':768,
@@ -347,10 +376,10 @@ if __name__ == '__main__':
         audio_model = FluencyScorerNoclu(input_dim=input_dim, embed_dim=args.embed_dim)
 
     print('Prepare datasets...')
-    tr_dataset = fluDataset('train', not args.cluster_pred)
+    tr_dataset = fluDataset('train', args.cluster_pred)
     tr_dataloader = DataLoader(tr_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=custom_collate_fn)
     # tr_dataloader = DataLoader(tr_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=custom_collate_fn)
-    te_dataset = fluDataset('test', not args.cluster_pred)
+    te_dataset = fluDataset('test', args.cluster_pred)
     te_dataloader = DataLoader(te_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=custom_collate_fn)
     print('Done.')
 
