@@ -48,12 +48,8 @@ class fluDataset(Dataset):
             paths[i] = paths[i].split('\t')[1]
         if set == 'train':
             self.utt_label = torch.tensor(np.load('../data/tr_label_utt.npy'), dtype=torch.float)
-        elif set == 'train_bflu':
-            self.utt_label = torch.tensor(np.load('../data/tr_bflu_label_utt.npy'), dtype=torch.float)
         elif set == 'test':
             self.utt_label = torch.tensor(np.load('../data/te_label_utt.npy'), dtype=torch.float)
-        elif set == 'test_bflu':
-            self.utt_label = torch.tensor(np.load('../data/te_bflu_label_utt.npy'), dtype=torch.float)
         self.paths = paths
 
     def __len__(self):
@@ -67,12 +63,8 @@ batch_size = 1
 
 tr_dataset = fluDataset('train')
 tr_dataloader = DataLoader(tr_dataset, batch_size=batch_size, shuffle=False)
-tr_bflu_dataset = fluDataset('train_bflu')
-tr_bflu_dataloader = DataLoader(tr_bflu_dataset, batch_size=batch_size, shuffle=False)
 te_dataset = fluDataset('test')
 te_dataloader = DataLoader(te_dataset, batch_size=batch_size, shuffle=False)
-te_bflu_dataset = fluDataset('test_bflu')
-te_bflu_dataloader = DataLoader(te_bflu_dataset, batch_size=batch_size, shuffle=False)
 
 max_iter, num_clusters, bs, n_init = 100, 50, 10000, 20
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -107,10 +99,6 @@ print("Saved KMeans model.")
 
 print('Start k-means prediction...')
 cluster_pred(tr_dataloader, saved_tensor_dict, 'tr')
-extract_feat_tensor, saved_tensor_dict = load_feature(tr_bflu_dataloader, 'tr_bflu')
-cluster_pred(tr_bflu_dataloader, saved_tensor_dict, 'tr_bflu')
 extract_feat_tensor, saved_tensor_dict = load_feature(te_dataloader, 'te')
 cluster_pred(te_dataloader, saved_tensor_dict, 'te')
-extract_feat_tensor, saved_tensor_dict = load_feature(te_bflu_dataloader, 'te_bflu')
-cluster_pred(te_bflu_dataloader, saved_tensor_dict, 'te_bflu')
 print('\033[1;34mMission Completed: cluster prediction.\033[0m')

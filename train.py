@@ -37,9 +37,12 @@ def set_arg(parser):
     parser.add_argument("--embed_dim", type=int, default=12, help="input feature embedding dimension")
     parser.add_argument("--loss_w_utt", type=float, default=1, help="weight for utterance-level loss")
     parser.add_argument("--model", type=str, default='fluScorer', help="name of the model")
+    parser.add_argument("--scorer", type=str, default='bilstm', help="name of the scorer")
     parser.add_argument("--am", type=str, default='wav2vec2.0', help="name of the acoustic models")
     parser.add_argument("--cluster_pred", type=bool, default=True, help="cluster predict in training or not")
+    parser.add_argument("--aspect", type=str, default=True, help="accuracy fluency prosody completeness total")
     parser.add_argument("--seed", type=int, default=66)
+    parser.add_argument("--accumlation_steps", type=int, default=1)
     return parser
 
 def convert_bin(input, num_binary=6):
@@ -86,9 +89,9 @@ def draw_train_fig(train_mse_values, val_mse_values, train_corr_values, val_corr
     plt.tight_layout()
     plt.savefig(f"{exp_dir}/train.jpg")
 
-def gen_result_header():
+def gen_result_header(args):
     utt_header_set = ['utt_train_mse', 'utt_train_pcc', 'utt_test_mse', 'utt_test_pcc']
-    utt_header_score = ['fluency']
+    utt_header_score = [args.aspect]
     utt_header = []
     for dset in utt_header_set:
         utt_header = utt_header + [dset+'_'+x for x in utt_header_score]
@@ -113,11 +116,6 @@ def train(audio_model, train_loader, test_loader, args):
 
     audio_model = audio_model.to(device)
 
-    if args.model == 'fluScorer':
-        kmeans_model = joblib.load(f'exp/kmeans/kmeans_model.joblib')
-    else:
-        kmeans_model = None
-
     # Set up the optimizer
     trainables = [p for p in audio_model.parameters() if p.requires_grad]
     print('Total parameter number is : {:.3f} k'.format(sum(p.numel() for p in audio_model.parameters()) / 1e3))
@@ -130,11 +128,11 @@ def train(audio_model, train_loader, test_loader, args):
 
     print("current #steps=%s, #epochs=%s" % (global_step, epoch))
     print("start training...")
-    result = np.zeros([args.n_epochs, 7])
+    result = np.zeros([args.n_epochs, 6])
     
     while epoch < args.n_epochs:
         audio_model.train()
-        for _, data in enumerate(train_loader):
+        for i, data in enumerate(train_loader):
             if len(data) == 3:
                 audio_paths, utt_label, feats = data
             elif len(data) == 4:
@@ -146,24 +144,16 @@ def train(audio_model, train_loader, test_loader, args):
             warm_up_step = 100
             if global_step <= warm_up_step and global_step % 5 == 0:
                 warm_lr = (global_step / warm_up_step) * args.lr
+                is_lr_changed = False
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = warm_lr
-                print('warm-up learning rate is {:f}'.format(optimizer.param_groups[0]['lr']))
+                    if warm_lr != param_group['lr']:
+                        param_group['lr'] = warm_lr
+                        is_lr_changed = True
+                if is_lr_changed:
+                    print('warm-up learning rate is {:f}'.format(optimizer.param_groups[0]['lr']))
       
             cluster_index = indexs + 1
             cluster_index = cluster_index.to(device)
-            '''
-            if args.model == 'fluScorer' and args.cluster_pred:
-                cluster_index = cluster_pred(feats, kmeans_model)
-                cluster_index = cluster_index.to(device)
-            else:
-                cluster_index_list = []
-                for index in indexs:
-                    cluster_index = convert_bin(index, 6)
-                    cluster_index_list.append(cluster_index)
-                cluster_index_tensor = torch.stack(cluster_index_list, dim=0)
-                cluster_index = cluster_index_tensor.to(device)
-            '''
 
             feats = feats.to(device)
             if args.model == 'fluScorer':
@@ -171,21 +161,24 @@ def train(audio_model, train_loader, test_loader, args):
             elif args.model == 'fluScorerNoclu':
                 pred = audio_model(feats)
 
-            flu_label = torch.unsqueeze(utt_label[:, 2], 1)
+            flu_label = torch.unsqueeze(utt_label[:, args.aspect_idx], 1)
             flu_label = flu_label.to(device, non_blocking=True)
             loss = loss_fn(pred, flu_label)
-
-            optimizer.zero_grad()
+            
+            loss = loss / args.accumlation_steps
             loss.backward()
-            optimizer.step()
-            global_step += 1
+            
+            if (i + 1) % args.accumlation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+                global_step += 1
 
         print('start validation')
 
         # ensemble results
         # don't save prediction for the training set
-        tr_mse, tr_corr = validate(audio_model, train_loader, args, -1, kmeans_model)
-        te_mse, te_corr = validate(audio_model, test_loader, args, best_mse, kmeans_model)
+        tr_mse, tr_corr = validate(audio_model, train_loader, args, -1)
+        te_mse, te_corr = validate(audio_model, test_loader, args, best_mse)
 
         train_mse_values.append(tr_mse)
         train_corr_values.append(tr_corr)
@@ -215,7 +208,7 @@ def train(audio_model, train_loader, test_loader, args):
         epoch += 1
 
     draw_train_fig(train_mse_values, val_mse_values, train_corr_values, val_corr_values, epochs_list, exp_dir)
-    header = ','.join(gen_result_header())
+    header = ','.join(gen_result_header(args))
     np.savetxt(exp_dir + '/result.csv', result, delimiter=',', header=header, comments='')
 
 def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
@@ -237,18 +230,6 @@ def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
             
             cluster_index = indexs + 1
             cluster_index = cluster_index.to(device)
-            '''
-            if args.model == 'fluScorer' and args.cluster_pred:
-                cluster_index = cluster_pred(feats, kmeans_model)
-                cluster_index = cluster_index.to(device)
-            else:
-                cluster_index_list = []
-                for index in indexs:
-                    cluster_index = convert_bin(index, 6)
-                    cluster_index_list.append(cluster_index)
-                cluster_index_tensor = torch.stack(cluster_index_list, dim=0)
-                cluster_index = cluster_index_tensor.to(device)
-            '''
 
             feats = feats.to(device)
             if args.model == 'fluScorer':
@@ -257,7 +238,7 @@ def validate(audio_model, val_loader, args, best_mse, kmeans_model=None):
                 flu_score = audio_model(feats)
             
             flu_score = flu_score.to('cpu').detach()
-            flu_label = torch.unsqueeze(torch.unsqueeze(utt_label[:, 2], 1), 1)
+            flu_label = torch.unsqueeze(torch.unsqueeze(utt_label[:, args.aspect_idx], 1), 1)
 
             A_flu.append(flu_score)
             A_flu_target.append(flu_label)
@@ -351,6 +332,17 @@ if __name__ == '__main__':
     parser = set_arg(parser)
     print("I am process %s, running on %s: starting (%s)" % (os.getpid(), os.uname()[1], time.asctime()))
     args = parser.parse_args()
+
+    aspect_map = {
+        "accuracy": 0,
+        "completeness": 1,
+        "fluency": 2,
+        "prosody": 3,
+        "total": 4
+    }
+
+    args.aspect_idx = aspect_map[args.aspect]
+
     if os.path.exists(args.exp_dir) == False:
         os.mkdir(args.exp_dir)
     am = args.am
@@ -370,7 +362,7 @@ if __name__ == '__main__':
 
     if args.model == 'fluScorer':
         print('now train a fluScorer models')
-        audio_model = FluencyScorer(input_dim=input_dim, embed_dim=args.embed_dim, clustering_dim=6)
+        audio_model = FluencyScorer(input_dim=input_dim, embed_dim=args.embed_dim, clustering_dim=6, scorer=args.scorer)
     elif args.model == 'fluScorerNoclu':
         print('now train a fluScorer models <<no cluster>>')
         audio_model = FluencyScorerNoclu(input_dim=input_dim, embed_dim=args.embed_dim)
